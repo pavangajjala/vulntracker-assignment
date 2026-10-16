@@ -35,3 +35,20 @@ class ScanResult(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     owner = relationship("User", back_populates="scans")
+
+    
+
+class ShareLink(Base):
+    """A public, time-limited link to one scan result (Shared Report Link feature)."""
+    __tablename__ = "share_links"
+
+    id = Column(Integer, primary_key=True, index=True)
+    # SHA-256 of the token. The token itself is never stored, so a database leak
+    # does not hand out working links.
+    token_hash = Column(String(64), unique=True, index=True, nullable=False)
+    scan_id = Column(Integer, ForeignKey("scan_results.id"), nullable=False)
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=False)
+    password_hash = Column(String(200), nullable=True)   # bcrypt hash, or NULL if no password
+    failed_attempts = Column(Integer, default=0, nullable=False)
+    expires_at = Column(DateTime, nullable=False)       # stored as UTC
+    created_at = Column(DateTime, default=datetime.utcnow)

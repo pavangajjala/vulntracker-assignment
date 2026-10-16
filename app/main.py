@@ -13,6 +13,7 @@ import models
 from auth import create_access_token, get_current_user, get_password_hash, verify_password
 from config import NOTIFY_SERVICE_URL
 from database import engine, get_db, search_scans_by_query
+from share import router as share_router
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -24,6 +25,7 @@ app = FastAPI(
     description="Vulnerability tracking and management REST API",
     version="1.0.0",
 )
+app.include_router(share_router)
 
 
 @app.middleware("http")
@@ -268,6 +270,7 @@ def delete_scan(
     ).first()
     if not scan:
         raise HTTPException(status_code=404, detail="Scan not found")
+    db.query(models.ShareLink).filter(models.ShareLink.scan_id == scan.id).delete()
     db.delete(scan)
     db.commit()
 
