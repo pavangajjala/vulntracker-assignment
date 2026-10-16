@@ -6,10 +6,13 @@ on:
   pull_request:
     branches: ["**"]
 
+# Least privilege: jobs can only read the repo.
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
-
     steps:
       - uses: actions/checkout@v4
 
@@ -26,7 +29,6 @@ jobs:
 
   test-notify:
     runs-on: ubuntu-latest
-
     steps:
       - uses: actions/checkout@v4
 
@@ -43,23 +45,106 @@ jobs:
         run: npm test
         working-directory: notify
 
-  # TODO (candidates): Add the following security scanning jobs.
-  # Tool selection is your decision — document your choices in findings.md.
-  #
-  # sast:
-  #   Static Application Security Testing against app/ source code
-  #   Upload JSON report as a build artifact named sast.<tool>.json
-  #   Build should fail on critical findings
-  #
-  # sca:
-  #   Dependency / Software Composition Analysis against requirements.txt
-  #   Upload JSON report as a build artifact named sca.<tool>.json
-  #   Build should fail on critical or high severity CVEs
-  #
-  # container-scan:
-  #   Build the Docker image, then scan it for vulnerabilities and misconfigurations
-  #   Upload JSON report as a build artifact named container.<tool>.json
-  #
-  # iac-scan:
-  #   Scan the Helm chart or Terraform configuration for security misconfigurations
-  #   Upload JSON report as a build artifact named iac.<tool>.json
+  # ---------------------------------------------------------------------------
+  # Security scanning
+  # ---------------------------------------------------------------------------
+
+  sast:
+    name: SAST (Semgrep)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Semgrep
+        run: |
+          docker run --rm -v "$PWD:/src" -w /src semgrep/semgrep \
+            semgrep scan --config p/python --config p/javascript --config p/secrets \
+            --json --output sast.semgrep.json app notify/src
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sast.semgrep.json
+          path: sast.semgrep.json
+
+      - name: Fail on high-severity findings
+        run: |
+          count=$(jq '[.results[] | select(.extra.severity == "ERROR")] | length' sast.semgrep.json)
+          echo "Semgrep ERROR-level findings: $count"
+          test "$count" -eq 0
+
+  sca:
+    name: SCA (Trivy)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Scan dependencies (JSON report)
+        run: |
+          docker run --rm -v "$PWD:/src" -v "$HOME/.cache/trivy:/root/.cache/trivy" aquasec/trivy:latest \
+            fs --scanners vuln --format json --output /src/sca.trivy.json /src
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sca.trivy.json
+          path: sca.trivy.json
+
+      - name: Fail on HIGH or CRITICAL CVEs
+        run: |
+          docker run --rm -v "$PWD:/src" -v "$HOME/.cache/trivy:/root/.cache/trivy" aquasec/trivy:latest \
+            fs --scanners vuln --severity HIGH,CRITICAL --exit-code 1 /src
+
+  container-scan:
+    name: Container scan (Trivy)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -t vulntracker-api:ci .
+
+      - name: Scan image (JSON report)
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$PWD:/src" \
+            -v "$HOME/.cache/trivy:/root/.cache/trivy" aquasec/trivy:latest \
+            image --scanners vuln,secret,misconfig --format json --output /src/container.trivy.json vulntracker-api:ci
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: container.trivy.json
+          path: container.trivy.json
+
+      - name: Fail on fixable HIGH or CRITICAL CVEs
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "$HOME/.cache/trivy:/root/.cache/trivy" aquasec/trivy:latest \
+            image --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 vulntracker-api:ci
+
+  iac-scan:
+    name: IaC scan (Checkov)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # CKV_K8S_21 is skipped on purpose: templates use .Release.Namespace, and Checkov
+      # renders the chart without one, so it always sees "default". See docs/findings.md.
+      - name: Run Checkov on the Helm chart
+        run: |
+          status=0
+          docker run --rm -v "$PWD:/src" bridgecrew/checkov \
+            -d /src/helm/vulntracker --framework helm --skip-check CKV_K8S_21 \
+            -o json --output-file-path /src/checkov-out || status=$?
+          sudo mv checkov-out/results_json.json iac.checkov.json
+          exit $status
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: iac.checkov.json
+          path: iac.checkov.json
