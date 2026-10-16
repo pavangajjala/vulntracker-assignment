@@ -215,3 +215,98 @@ We are not grading on volume. We are grading on judgment.
 - **Communication**: Would a non-technical executive understand your summary?
 
 Good luck. If anything in the brief is ambiguous, document your assumption and proceed.
+
+
+---
+
+# Submission notes
+
+Everything below describes my changes to the starter project.
+
+| Deliverable | Location |
+|---|---|
+| Shared Report Link feature (Task 1) | `app/share.py`, `app/models.py` (`ShareLink`), tests in `tests/test_share.py` |
+| Scan reports (Task 2a) | `reports/` (after) and `reports/baseline/` (original starter code, for comparison) |
+| Findings (Task 2b) | `docs/findings.md` |
+| Fixes and regression tests (Task 3) | Git history; tests in `tests/test_security.py` |
+| Remediation plan (Task 3) | `docs/remediation-plan.md` |
+| Dockerfile and Helm chart (Task 4) | `Dockerfile`, `helm/vulntracker/` |
+| Executive summary (Task 5) | `docs/executive-summary.md` |
+| CI security gates | `.github/workflows/ci.yml` (SAST, SCA, container and IaC jobs) |
+
+## Running locally (changed)
+
+The API no longer contains any secrets, so it needs a JWT signing key at startup (at least 32 characters). It refuses to start without one.
+
+```bash
+# Linux / macOS
+export JWT_SECRET_KEY=$(python -c "import secrets; print(secrets.token_urlsafe(48))")
+cd app && uvicorn main:app --reload
+```
+```powershell
+# Windows PowerShell
+$env:JWT_SECRET_KEY = python -c "import secrets; print(secrets.token_urlsafe(48))"
+cd app; uvicorn main:app --reload
+```
+
+Tests need the dev requirements (adds `pytest`):
+
+```bash
+pip install -r requirements-dev.txt
+pytest tests/ -v
+```
+
+### Configuration
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `JWT_SECRET_KEY` | none (required) | JWT signing key. Read from `$SECRETS_DIR/jwt_secret_key` if that file exists, otherwise from the env var |
+| `SECRETS_DIR` | `/run/secrets/vulntracker` | Where Kubernetes mounts secrets |
+| `SHARE_BASE_URL` | `http://localhost:8000` | Base of generated share links |
+| `ALLOWED_ORIGINS` | empty | Comma-separated browser origins allowed by CORS |
+| `DATABASE_URL` | `sqlite:///./vulntracker.db` | Database location (`/data` inside the container) |
+| `NOTIFY_SERVICE_URL` | `http://localhost:3001` | Notification service |
+
+## Shared Report Link
+
+```bash
+# Create a link (password optional, 8-72 characters)
+curl -X POST http://localhost:8000/scans/1/share \
+  -H "Authorization: Bearer <token>" -H "Content-Type: application/json" \
+  -d '{"password": "correct-horse"}'
+
+# Open it (public). Password via header (preferred) or ?password= (required by the brief)
+curl http://localhost:8000/share/<token> -H "X-Share-Password: correct-horse"
+```
+
+**`share_url` choice:** links are built from `SHARE_BASE_URL` (default `http://localhost:8000`), not from the request's Host header, which an attacker could control (host-header injection).
+
+## Docker
+
+```bash
+docker build -t vulntracker-api:local .
+docker run -d --name vt -p 8000:8000 -e JWT_SECRET_KEY=<random-32+-char-value> vulntracker-api:local
+docker ps          # STATUS shows "(healthy)" after ~30s
+docker exec vt id  # uid=10001(app) - not root
+```
+
+The image uses a digest-pinned `python:3.11-slim` base, a multi-stage build, runs as a non-root user, has a `HEALTHCHECK`, and contains no secrets or packaging tools. For a production-like run, mount the secret as a file instead of an env var:
+`-v /path/to/jwt_secret_key:/run/secrets/vulntracker/jwt_secret_key:ro`
+
+## Kubernetes (Helm)
+
+Prerequisites: the External Secrets Operator with a `ClusterSecretStore` named `aws-secrets-manager`, the secret `vulntracker/prod/jwt-secret-key` in AWS Secrets Manager, and the ingress-nginx controller.
+
+```bash
+helm lint helm/vulntracker
+helm install vt helm/vulntracker -n vulntracker --create-namespace \
+  --set image.digest=sha256:<pushed-image-digest>
+```
+
+The chart pulls the secret from AWS Secrets Manager and mounts it read-only as a file; a NetworkPolicy allows ingress only from the ingress controller and egress only to DNS and the notify service; the pod runs non-root with a read-only filesystem, all capabilities dropped, seccomp, resource limits and no service-account token.
+
+## Assumptions
+
+- The notify service is internal-only and was not changed apart from upgrading vulnerable dependencies (see `docs/remediation-plan.md`).
+- SQLite is kept for the prototype, so the chart runs one replica.
+- The image digest in `values.yaml` is a placeholder; a real pipeline would push the image and deploy by its digest.
