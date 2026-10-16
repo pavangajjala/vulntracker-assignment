@@ -11,7 +11,8 @@ WORKDIR /build
 COPY requirements.txt .
 RUN python -m venv /opt/venv \
  && /opt/venv/bin/pip install --upgrade pip \
- && /opt/venv/bin/pip install -r requirements.txt
+ && /opt/venv/bin/pip install -r requirements.txt \
+ && /opt/venv/bin/pip uninstall -y pip setuptools wheel
 
 # ---- Stage 2: small runtime image, no build tools ----
 FROM ${PYTHON_IMAGE}
@@ -20,8 +21,9 @@ ENV PATH="/opt/venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
     DATABASE_URL=sqlite:////data/vulntracker.db
 
-# Unprivileged user. /data is the only directory the app can write to.
-RUN groupadd --system --gid 10001 app \
+# Remove packaging tools (not needed at runtime) and create an unprivileged user.
+RUN /usr/local/bin/python -m pip uninstall -y pip setuptools wheel \
+ && groupadd --system --gid 10001 app \
  && useradd --system --uid 10001 --gid app --no-create-home --shell /usr/sbin/nologin app \
  && mkdir /data && chown app:app /data
 
