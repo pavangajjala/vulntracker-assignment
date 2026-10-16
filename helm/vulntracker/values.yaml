@@ -1,0 +1,52 @@
+# SQLite lives on local disk, so only one replica is safe.
+# Move to a managed database (e.g. RDS PostgreSQL) before scaling out.
+replicaCount: 1
+
+image:
+  repository: ghcr.io/pavangajjala/vulntracker-api
+  # Deploy by digest (immutable) rather than a tag that can be re-pointed.
+  digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  pullPolicy: Always
+
+app:
+  shareBaseUrl: "https://vulntracker.example.com"
+  allowedOrigins: ""          # comma separated, empty = no browser origins allowed
+  notifyServiceUrl: "http://vulntracker-notify:3001"
+
+# Secrets come from AWS Secrets Manager through the External Secrets Operator.
+# Nothing secret is stored in this chart, in values, or in env vars.
+secrets:
+  refreshInterval: 1h
+  storeRef:
+    kind: ClusterSecretStore
+    name: aws-secrets-manager
+  jwtSecretKey:
+    remoteKey: vulntracker/prod/jwt-secret-key
+
+serviceAccount:
+  annotations: {}
+
+service:
+  port: 8000
+
+ingress:
+  enabled: true
+  className: nginx
+  host: vulntracker.example.com
+  tlsSecretName: vulntracker-tls
+
+networkPolicy:
+  # Only the ingress controller may reach the API.
+  ingressControllerNamespace: ingress-nginx
+  # The API may only call DNS and the notify service.
+  notifyPodLabels:
+    app.kubernetes.io/name: vulntracker-notify
+  notifyPort: 3001
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
